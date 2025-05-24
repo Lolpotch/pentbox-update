@@ -121,80 +121,109 @@ module Network_pb
 		end
 	end
 	
-	def honeyconfig_html(port, path, sound, log, logname) # Function to launch the Honeypot.
+	require 'socket'
+	require 'uri'
+
+	def honeyconfig_html(port, html_path, sound, log, logname)
 		begin
-			tcpserver = TCPServer.new("", port)
-			if tcpserver
-				puts ""
-				puts "  HONEYPOT ACTIVATED ON PORT #{port} (#{Time.now.to_s})"
-				puts ""
-				if log == "y" || log == "Y"
-					# If log is enabled, writes Honeypot activation time.
-					begin
-						File.open(logname, "a") do |logf|
-							logf.puts "#################### PenTBox Honeypot log"
-							logf.puts ""
-							logf.puts "  HONEYPOT ACTIVATED ON PORT #{port} (#{Time.now.to_s})"
-							logf.puts ""
-						end
-					rescue Errno::ENOENT
-						puts ""
-						puts " Saving log error: No such file or directory."
-						puts ""
+			tcpserver = TCPServer.new('0.0.0.0', port)
+			puts "\n  HONEYPOT ACTIVATED ON PORT #{port} (#{Time.now})\n\n"
+
+			if log.downcase == "y"
+				begin
+					File.open(logname, "a") do |logf|
+						logf.puts "#################### PenTBox Honeypot log"
+						logf.puts ""
+						logf.puts "  HONEYPOT ACTIVATED ON PORT #{port} (#{Time.now})"
+						logf.puts ""
 					end
-				end
-				loop do
-					socket = tcpserver.accept
-					sleep(1) # It is to solve possible DoS Attacks.
-					if socket
-						Thread.new do
-							remotePort, remoteIp = Socket.unpack_sockaddr_in(socket.getpeername) # Gets the remote port and ip.
-							puts ""
-							puts "  Activity from #{remoteIp}:#{remotePort} (#{Time.now.to_s})"
-							puts " -----------------------------"
-							reciv = socket.recv(1000).to_s
-							puts reciv
-							if sound == "y" || sound == "Y"
-								# If sound is enabled, then beep 3 times.
-								puts "\a\a\a"
-							end
-							if log == "y" || log == "Y"
-								# If log is enabled, writes the intrusion.
-								begin
-									File.open(logname, "a") do |logf|
-										logf.puts ""
-										logf.puts "  Activity from #{remoteIp}:#{remotePort} (#{Time.now.to_s})"
-										logf.puts " -----------------------------"
-										logf.puts reciv
-									end
-								rescue Errno::ENOENT
-									puts ""
-									puts " Saving log error: No such file or directory."
-									puts ""
-								end
-							end
-							sleep(2) # This is a sticky honeypot.
-							html_content = File.read(path)
-							socket.write(html_content)
-							socket.close
-						end
-					end
+				rescue Errno::ENOENT
+					puts "\n Saving log error: No such file or directory.\n"
 				end
 			end
+
+			root_dir = File.dirname(html_path)
+
+			loop do
+				socket = tcpserver.accept
+				sleep(1)  # To mitigate DoS
+
+				Thread.new do
+					remote_port, remote_ip = Socket.unpack_sockaddr_in(socket.getpeername)
+					puts "\n  Activity from #{remote_ip}:#{remote_port} (#{Time.now})"
+					puts " -----------------------------"
+
+					request_line = socket.gets
+					next unless request_line
+
+					while (line = socket.gets)
+						break if line.strip.empty?
+					end
+
+					# Logging received raw input
+					if log.downcase == "y"
+						File.open(logname, "a") do |logf|
+							logf.puts "\n  Activity from #{remote_ip}:#{remote_port} (#{Time.now})"
+							logf.puts " -----------------------------"
+							logf.puts request_line
+						end
+					end
+
+					puts request_line
+
+					puts "\a\a\a" if sound.downcase == "y"
+
+					method, path, _ = request_line.split
+					path = URI.decode_www_form_component(path || "/")
+
+					full_path = File.join(root_dir, path.sub(/^\//, ''))
+
+					if path.end_with?(".css")
+						serve_file(socket, full_path, "text/css")
+					elsif path.end_with?(".jpg") || path.end_with?(".jpeg")
+						serve_file(socket, full_path, "image/jpeg", binary: true)
+					elsif path == "/" || path.end_with?(".html")
+						serve_file(socket, html_path, "text/html")
+					else
+						send_404(socket)
+					end
+
+					sleep(2)  # Sticky honeypot delay
+					socket.close
+				end
+			end
+
 		rescue Errno::EACCES
-			puts ""
-			puts " Error: Honeypot requires root privileges."
-			puts ""
+			puts "\n Error: Honeypot requires root privileges.\n"
 		rescue Errno::EADDRINUSE
-			puts ""
-			puts " Error: Port in use."
-			puts ""
-		rescue
-			puts ""
-			puts " Unknown error."
-			puts ""
+			puts "\n Error: Port in use.\n"
+		rescue => e
+			puts "\n Unknown error: #{e.message}\n"
 		end
 	end
+
+	def serve_file(socket, path, content_type, binary: false)
+		if File.exist?(path)
+			content = binary ? File.binread(path) : File.read(path)
+			socket.print "HTTP/1.1 200 OK\r\n"
+			socket.print "Content-Type: #{content_type}\r\n"
+			socket.print "Content-Length: #{content.bytesize}\r\n"
+			socket.print "Connection: close\r\n\r\n"
+			socket.write content
+		else
+			send_404(socket)
+		end
+	end
+
+	def send_404(socket)
+		msg = "<h1>404 Not Found</h1>"
+		socket.print "HTTP/1.1 404 Not Found\r\n"
+		socket.print "Content-Type: text/html\r\n"
+		socket.print "Content-Length: #{msg.bytesize}\r\n"
+		socket.print "Connection: close\r\n\r\n"
+		socket.write msg
+	end
+
 	
 	case configuration
 		when "1"
